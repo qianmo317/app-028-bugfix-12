@@ -1,0 +1,60 @@
+{
+  "papers": [
+    { "id": "p4x6", "name": "4×6 英寸", "wMm": 102, "hMm": 152, "marginMm": 3, "priceCents": 100, "kind": "sheet" },
+    { "id": "p5x7", "name": "5×7 英寸", "wMm": 127, "hMm": 178, "marginMm": 3, "priceCents": 150, "kind": "sheet" },
+    { "id": "p6x8", "name": "6×8 英寸", "wMm": 152, "hMm": 203, "marginMm": 3, "priceCents": 200, "kind": "sheet" },
+    { "id": "p8x10", "name": "8×10 英寸", "wMm": 203, "hMm": 254, "marginMm": 4, "priceCents": 300, "kind": "sheet" },
+    { "id": "p12x18", "name": "12×18 英寸", "wMm": 305, "hMm": 457, "marginMm": 5, "priceCents": 600, "kind": "sheet" },
+    { "id": "pa4", "name": "A4", "wMm": 210, "hMm": 297, "marginMm": 3, "priceCents": 250, "kind": "sheet" },
+    { "id": "pa3", "name": "A3", "wMm": 297, "hMm": 420, "marginMm": 4, "priceCents": 400, "kind": "sheet" },
+    { "id": "proll152", "name": "卷筒相纸（宽 152mm × 长 5000mm）", "wMm": 152, "hMm": 5000, "marginMm": 3, "priceCents": 3000, "kind": "roll" }
+  ],
+  "photoSizes": [
+    { "id": "s1cun", "name": "1 寸", "wMm": 25, "hMm": 35, "rotateByDefault": false },
+    { "id": "s2cun_s", "name": "小 2 寸", "wMm": 35, "hMm": 45, "rotateByDefault": false },
+    { "id": "s2cun_l", "name": "大 2 寸", "wMm": 35, "hMm": 49, "rotateByDefault": false },
+    { "id": "s5cun", "name": "5 寸", "wMm": 89, "hMm": 127, "rotateByDefault": true },
+    { "id": "s6cun", "name": "6 寸", "wMm": 102, "hMm": 152, "rotateByDefault": true },
+    { "id": "s7cun", "name": "7 寸", "wMm": 127, "hMm": 178, "rotateByDefault": true },
+    { "id": "sa4", "name": "A4 照片", "wMm": 210, "hMm": 297, "rotateByDefault": true }
+  ],
+  "templates": [
+    {
+      "id": "tpl_id_1cun_8",
+      "name": "证件照 · 1 寸 8 张（5×7 相纸）",
+      "paperId": "p5x7",
+      "items": [{ "sizeId": "s1cun", "qty": 8, "rotateAllowed": false, "keepTogether": true }]
+    },
+    {
+      "id": "tpl_id_2cun_4",
+      "name": "证件照 · 小 2 寸 4 张（5×7 相纸）",
+      "paperId": "p5x7",
+      "items": [{ "sizeId": "s2cun_s", "qty": 4, "rotateAllowed": false, "keepTogether": true }]
+    },
+    {
+      "id": "tpl_id_mixed",
+      "name": "证件照 · 混排 8 张 1 寸 + 8 张小 2 寸 + 2 张 5 寸（A3 相纸）",
+      "paperId": "pa3",
+      "items": [
+        { "sizeId": "s1cun", "qty": 8, "rotateAllowed": false, "keepTogether": true },
+        { "sizeId": "s2cun_s", "qty": 8, "rotateAllowed": false, "keepTogether": true },
+        { "sizeId": "s5cun", "qty": 2, "rotateAllowed": true, "keepTogether": true }
+      ]
+    },
+    {
+      "id": "tpl_6cun_12x18",
+      "name": "冲印 · 6 寸 6 张（12×18 相纸）",
+      "paperId": "p12x18",
+      "items": [{ "sizeId": "s6cun", "qty": 6, "rotateAllowed": true, "keepTogether": false }]
+    },
+    {
+      "id": "tpl_wall_a4",
+      "name": "照片墙 · A4 相纸 5 寸 2 张 + 6 寸 2 张",
+      "paperId": "pa4",
+      "items": [
+        { "sizeId": "s5cun", "qty": 2, "rotateAllowed": true, "keepTogether": false },
+        { "sizeId": "s6cun", "qty": 2, "rotateAllowed": true, "keepTogether": false }
+      ]
+    }
+  ]
+}
