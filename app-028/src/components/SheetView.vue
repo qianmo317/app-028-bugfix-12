@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { headerFooterLayout, type HeadFootMark } from '../logic/sheetMarks'
 import type { Paper, Placement, Sheet } from '../logic/types'
 
 const props = withDefaults(
@@ -171,10 +172,18 @@ function onPointerUp() {
   if (p) emit('moveend', { seq, x: p.x, y: p.y })
 }
 
-const headerFontSize = computed(() => {
-  const mm = Math.max(1.5, Math.min(4, props.paper.marginMm * 0.5))
-  return props.unit === 'mm' ? `${mm}mm` : `${mm * props.scale}px`
-})
+/** 页眉 / 落款：与导出（PDF/PNG）同一套布局，分别贴上、下纸边居中 */
+const headFoot = computed(() => headerFooterLayout(props.paper, props.headerText, props.footerText))
+
+function hfStyle(hf: HeadFootMark) {
+  return {
+    left: u(hf.xMm),
+    top: u(hf.yMm),
+    transform: 'translate(-50%, -50%)',
+    fontSize: props.unit === 'mm' ? `${hf.sizeMm}mm` : `${hf.sizeMm * props.scale}px`,
+    zIndex: 7,
+  }
+}
 
 const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
 </script>
@@ -184,11 +193,11 @@ const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
     <div class="sheet-grid" :style="gridStyle"></div>
     <div v-if="showSafeArea" class="sheet-safe" :style="safeStyle"></div>
 
-    <div v-if="headerText" class="cut-label" :style="{ fontSize: headerFontSize }">
-      {{ headerText }}
+    <div v-if="headFoot.header" class="cut-label sheet-hf" :style="hfStyle(headFoot.header)">
+      {{ headFoot.header.text }}
     </div>
-    <div v-if="footerText" class="cut-label" :style="{ fontSize: headerFontSize }">
-      {{ footerText }}
+    <div v-if="headFoot.footer" class="cut-label sheet-hf" :style="hfStyle(headFoot.footer)">
+      {{ headFoot.footer.text }}
     </div>
 
     <div

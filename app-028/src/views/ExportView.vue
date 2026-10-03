@@ -98,6 +98,7 @@ async function exportPng(index: number) {
       dpi: dpi.value,
       photoOf: photoResolver(),
       sizeLabelOf,
+      sheetCount: sheets.value.length,
     })
     downloadBlob(blob, `${task.value!.name}-sheet${index + 1}-${dpi.value}dpi.png`)
     message.value = `第 ${index + 1} 张 PNG 已导出（${dpi.value}dpi，1:1）`
@@ -121,6 +122,7 @@ async function exportAllPng() {
         dpi: dpi.value,
         photoOf: photoResolver(),
         sizeLabelOf,
+        sheetCount: sheets.value.length,
       })
       downloadBlob(blob, `${task.value!.name}-sheet${i + 1}-${dpi.value}dpi.png`)
       await new Promise((r) => setTimeout(r, 250))
@@ -236,6 +238,12 @@ function printView() {
           <div class="note warn">
             打印时必须在打印对话框里<strong>关闭「适应页面 / Fit to page」</strong>，选择「实际大小 / 100%」；
             否则尺寸会被整体缩放，1:1 不成立。打印后先用直尺量页面上的 100mm 校验尺确认。
+          </div>
+          <div class="note" style="margin-top: 8px">
+            PDF 与 PNG 出自<strong>同一份切割方案</strong>（裁切步骤页的切割步骤）：刀序号、纸边刻度、
+            页眉落款完全一致，改摆位 / 换纸 / 改页眉落款后重新导出即更新。区别只在介质：PDF 每页 =
+            一张相纸，100mm 校验尺在末页校验页；PNG 纸外有标注带，校验尺在纸下方、刻度探出纸外。
+            若两处出现不一致，<strong>以「裁切步骤」页与切割清单 CSV 为准</strong>（两者均为切割方案直出）。
           </div>
           <div class="kv" style="margin-top: 10px">
             <dt>相纸</dt>

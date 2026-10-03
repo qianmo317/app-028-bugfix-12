@@ -5,6 +5,8 @@ import { validateCutSequence, type CutLine, type Rect } from './guillotine'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from './library'
 import { pack, sheetsFromPlacements, usableRegion, type PackGroup, type PackOptions } from './packer'
 import { buildPdf } from './pdf'
+import { buildSheetPng } from './png'
+import { computeSheetMarks, cutLabelBox, RULER_LENGTH_MM } from './sheetMarks'
 import { MM_TO_PT, mmToPt, mmToPx, pxToMm } from './units'
 import type { Paper, Placement, Sheet } from './types'
 
@@ -482,6 +484,192 @@ function assertPerformance(): AssertionResult {
   }
 }
 
+/**
+ * ⑧ 导出一致性：刀序号与纸边刻度由当前切割步骤（cutSteps）算出；
+ * 同一输入重复导出逐字节一致；只有一刀 / 压纸边 / 空页眉落款等边界结果确定
+ */
+async function assertExportConsistency(): Promise<AssertionResult> {
+  const t0 = performance.now()
+  const problems: string[] = []
+  const paper = BUILTIN_PAPERS.find((p) => p.id === 'p5x7') as Paper
+  const opts: PackOptions = {
+    paperW: paper.wMm,
+    paperH: paper.hMm,
+    marginMm: paper.marginMm,
+    safeEdgeMm: 3,
+    gapMm: 0,
+    kerfMm: 0.5,
+    allowRotate: false,
+  }
+  const out = pack(
+    [{ itemId: 'a', copies: 8, photoW: 25, photoH: 35, allowRotate: false, keepTogether: false }],
+    opts,
+  )
+  const sheets = out.result.sheets
+  const task = {
+    id: 't',
+    name: '一致性',
+    paperId: paper.id,
+    items: [],
+    gapMm: 0,
+    kerfMm: 0.5,
+    safeEdgeMm: 3,
+    allowRotate: false,
+    headerText: 'HDR-A',
+    footerText: 'FTR-2026',
+    createdAt: 0,
+  }
+
+  // 刀序与刻度由当前切割步骤算出（唯一事实来源）
+  const marks = computeSheetMarks(sheets[0], paper, task)
+  if (marks.cuts.length !== sheets[0].cutSteps.length) {
+    problems.push(`刀数 ${marks.cuts.length} ≠ 切割步骤数 ${sheets[0].cutSteps.length}`)
+  }
+  marks.cuts.forEach((c, i) => {
+    const s = sheets[0].cutSteps[i]
+    if (!s || c.n !== i + 1 || c.axis !== s.axis || c.at !== s.at || c.from !== s.from || c.to !== s.to) {
+      problems.push(`第 ${i + 1} 刀与切割步骤不对应`)
+    }
+  })
+  for (const c of marks.cuts) {
+    const edges = c.axis === 'v' ? (['top', 'bottom'] as const) : (['left', 'right'] as const)
+    for (const e of edges) {
+      const hit = marks.ticks.some(
+        (t) => t.edge === e && Math.abs(t.at - c.at) < 0.01 && t.cuts.includes(c.n),
+      )
+      if (!hit) problems.push(`第 ${c.n} 刀在 ${e} 边缺少刻度`)
+    }
+  }
+  // 刀序标签：落在自己的切割线上，且两两不重叠（交叉刀的序号也能看清）
+  for (const c of marks.cuts) {
+    const onLine =
+      c.axis === 'v'
+        ? Math.abs(c.lx - c.at) < 1e-9 && c.ly >= c.from - 1e-9 && c.ly <= c.to + 1e-9
+        : Math.abs(c.ly - c.at) < 1e-9 && c.lx >= c.from - 1e-9 && c.lx <= c.to + 1e-9
+    if (!onLine) problems.push(`第 ${c.n} 刀的序号标签不在切割线上`)
+  }
+  for (let a = 0; a < marks.cuts.length; a++) {
+    for (let b = a + 1; b < marks.cuts.length; b++) {
+      const A = marks.cuts[a]
+      const B = marks.cuts[b]
+      const ba = cutLabelBox(A)
+      const bb = cutLabelBox(B)
+      if (Math.abs(A.lx - B.lx) < (ba.w + bb.w) / 2 && Math.abs(A.ly - B.ly) < (ba.h + bb.h) / 2) {
+        problems.push(`刀序 ${A.n} 与 ${B.n} 的标签重叠`)
+      }
+    }
+  }
+
+  // 边界：只有一刀 → 1 个刀序、上下边各 1 道刻度；没填页眉落款 → 不出现
+  const paper100: Paper = { ...paper, wMm: 100, hMm: 100, marginMm: 5 }
+  const oneCut: Sheet = {
+    index: 0,
+    placements: [],
+    cutSteps: [{ sheetIndex: 0, axis: 'v', at: 50, from: 0, to: 100, merged: false }],
+    rawCutCount: 1,
+    usedAreaMm2: 0,
+    sheetAreaMm2: 10000,
+    utilization: 0,
+    wasteRects: [],
+  }
+  const m1 = computeSheetMarks(oneCut, paper100, { headerText: '', footerText: '' })
+  if (m1.cuts.length !== 1 || m1.ticks.length !== 2) {
+    problems.push(`只有一刀时应为 1 刀序 + 2 刻度，实际 ${m1.cuts.length} 刀 / ${m1.ticks.length} 刻度`)
+  }
+  if (m1.header || m1.footer) problems.push('未填页眉落款时不应出现页眉落款')
+
+  // 边界：切割线正好压纸边（at = 0 / 纸边长）→ 刻度钳在纸边上且不丢失
+  const edgeCuts: Sheet = {
+    ...oneCut,
+    cutSteps: [
+      { sheetIndex: 0, axis: 'h', at: 0, from: 0, to: 100, merged: false },
+      { sheetIndex: 0, axis: 'h', at: 100, from: 0, to: 100, merged: false },
+    ],
+  }
+  const m2 = computeSheetMarks(edgeCuts, paper100, { headerText: 'H', footerText: 'F' })
+  const leftTicks = m2.ticks.filter((t) => t.edge === 'left').map((t) => t.at)
+  if (!leftTicks.includes(0) || !leftTicks.includes(100)) problems.push('压纸边的切割线刻度丢失')
+  if (!m2.header || !m2.footer) problems.push('页眉/落款缺失')
+  else if (m2.header.yMm >= m2.footer.yMm) problems.push('页眉不在落款上方')
+
+  // 改页眉落款 / 换纸 → 重新计算即跟着变
+  const m3 = computeSheetMarks(sheets[0], paper, { headerText: 'CHANGED', footerText: '' })
+  if (m3.header?.text !== 'CHANGED' || m3.footer !== null) problems.push('改页眉落款后标注未更新')
+  const m4 = computeSheetMarks(oneCut, { ...paper100, wMm: 40 }, { headerText: '', footerText: '' })
+  const topTick = m4.ticks.find((t) => t.edge === 'top')
+  if (!topTick || topTick.at !== 40) problems.push('换纸（改纸宽）后刻度未按新纸宽钳制')
+
+  // PDF：同一输入重复导出逐字节一致；虚线、每刀标注、纸边刻度、页眉落款齐全
+  const pdfInput = { task, paper, sheets, photoOf: () => undefined, sizeLabelOf: () => '25x35' }
+  const pdf1 = await buildPdf(pdfInput)
+  const pdf2 = await buildPdf(pdfInput)
+  const text1 = await pdf1.text()
+  const text2 = await pdf2.text()
+  if (text1 !== text2) problems.push('同一输入重复导出的 PDF 内容不一致')
+  if (!/\[[\d.]+ [\d.]+\] 0 d/.test(text1)) problems.push('PDF 切割线未使用虚线（dash）')
+  const totalCuts = sheets.reduce((a, s) => a + s.cutSteps.length, 0)
+  const cutMarkers = text1.match(/% cut \d+/g) ?? []
+  if (cutMarkers.length !== totalCuts) {
+    problems.push(`PDF 刀序标注 ${cutMarkers.length} 个 ≠ 切割步骤 ${totalCuts} 刀`)
+  }
+  const totalTicks = sheets.reduce((a, s) => a + computeSheetMarks(s, paper, task).ticks.length, 0)
+  const tickMarkers = text1.match(/% tick /g) ?? []
+  if (tickMarkers.length !== totalTicks) {
+    problems.push(`PDF 纸边刻度 ${tickMarkers.length} 条 ≠ 应有 ${totalTicks} 条`)
+  }
+  const hy = /([\d.]+) Td \(HDR-A\)/.exec(text1)
+  const fy = /([\d.]+) Td \(FTR-2026\)/.exec(text1)
+  if (!hy || !fy) problems.push('PDF 中找不到页眉/落款文字')
+  else if (Number(hy[1]) <= Number(fy[1])) problems.push('PDF 页眉不在落款上方（上下不分）')
+
+  // PNG：同一输入重复导出逐字节一致；画布宽度足以容纳 100mm 校验尺
+  const pngInput = {
+    task,
+    paper,
+    sheet: sheets[0],
+    dpi: 150,
+    photoOf: () => undefined,
+    sizeLabelOf: () => '',
+    sheetCount: sheets.length,
+  }
+  const png1 = await buildSheetPng(pngInput)
+  const png2 = await buildSheetPng(pngInput)
+  const [ba, bb] = await Promise.all([png1.arrayBuffer(), png2.arrayBuffer()])
+  if (ba.byteLength !== bb.byteLength) {
+    problems.push('同一输入重复导出的 PNG 大小不一致')
+  } else {
+    const ua = new Uint8Array(ba)
+    const ub = new Uint8Array(bb)
+    let diff = false
+    for (let i = 0; i < ua.length; i++) {
+      if (ua[i] !== ub[i]) {
+        diff = true
+        break
+      }
+    }
+    if (diff) problems.push('同一输入重复导出的 PNG 内容不一致')
+  }
+  const bmp = await createImageBitmap(png1)
+  const expectW = Math.round(mmToPx(Math.max(paper.wMm, RULER_LENGTH_MM) + 24, 150))
+  if (Math.abs(bmp.width - expectW) > 1) {
+    problems.push(`PNG 画布宽 ${bmp.width}px ≠ 预期 ${expectW}px（须容纳 100mm 校验尺）`)
+  }
+  bmp.close()
+
+  return {
+    id: 'export-consistency',
+    title: '⑧ 导出一致性：刀序/刻度由当前切割步骤算出，PDF 与 PNG 同源，重复导出一致',
+    pass: problems.length === 0,
+    detail: problems.length
+      ? problems.join('；')
+      : `第 1 张 ${sheets[0].cutSteps.length} 刀 → 纸边刻度 ${computeSheetMarks(sheets[0], paper, task).ticks.length} 道，刀序/刻度与 cutSteps 一一对应；` +
+        `只有一刀、压纸边、空页眉落款、改页眉落款、换纸钳制均符合预期；` +
+        `重复导出 PDF（${(text1.length / 1024).toFixed(0)}KB）与 PNG（${(ba.byteLength / 1024).toFixed(0)}KB）逐字节一致；` +
+        `PDF 含虚线切割线、${cutMarkers.length} 个刀序标注、${tickMarkers.length} 条刻度，页眉在上落款在下`,
+    ms: Math.round(performance.now() - t0),
+  }
+}
+
 export async function runSelfTest(): Promise<AssertionResult[]> {
   const results: AssertionResult[] = []
   results.push(assertGuillotine())
@@ -501,5 +689,16 @@ export async function runSelfTest(): Promise<AssertionResult[]> {
     })
   }
   results.push(assertPerformance())
+  try {
+    results.push(await assertExportConsistency())
+  } catch (e) {
+    results.push({
+      id: 'export-consistency',
+      title: '⑧ 导出一致性：刀序/刻度由当前切割步骤算出，PDF 与 PNG 同源',
+      pass: false,
+      detail: `异常：${e instanceof Error ? e.message : String(e)}`,
+      ms: 0,
+    })
+  }
   return results
 }

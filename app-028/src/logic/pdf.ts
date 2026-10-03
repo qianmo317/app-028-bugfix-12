@@ -4,6 +4,7 @@
  * - 照片以 JPEG XObject 嵌入；中文说明以位图嵌入（PDF 内置西文字体无法显示中文）
  */
 import { imageToJpeg, renderTextBlock, renderTextStrip, type RasterImage } from './image'
+import { computeSheetMarks, RULER_LENGTH_MM, tickLabel } from './sheetMarks'
 import { MM_TO_PT } from './units'
 import type { Paper, Placement, Sheet, Task } from './types'
 
@@ -51,11 +52,14 @@ interface PageSpec {
   images: PageImage[]
 }
 
-/** 粗略估算 Helvetica 文本宽度（用于居中） */
+/** 粗略估算 Helvetica 文本宽度（用于居中/右对齐） */
 const textW = (s: string, size: number) => s.length * size * 0.52
 
-function text(x: number, y: number, s: string, size: number, bold = false, center = false) {
-  const t = center ? x - textW(s, size) / 2 : x
+type TextAlign = 'l' | 'c' | 'r'
+
+function text(x: number, y: number, s: string, size: number, bold = false, align: TextAlign = 'l') {
+  const w = textW(s, size)
+  const t = align === 'c' ? x - w / 2 : align === 'r' ? x - w : x
   return `BT /${bold ? 'F2' : 'F1'} ${n2(size)} Tf ${n2(t)} ${n2(y)} Td (${pdfEscape(s)}) Tj ET`
 }
 
@@ -91,21 +95,18 @@ async function buildSheetPage(
     )
   }
 
-  // 页眉 / 落款
-  const header = input.task.headerText.trim()
-  const footer = input.task.footerText.trim()
-  for (const [txt, top] of [
-    [header, true],
-    [footer, false],
-  ] as Array<[string, boolean]>) {
-    if (!txt) continue
-    const sizeMm = Math.max(1.5, Math.min(4, paper.marginMm * 0.5))
-    const yMm = top ? paper.marginMm / 2 - sizeMm / 2 : H - paper.marginMm / 2 - sizeMm / 2
-    if (hasNonAscii(txt)) {
-      const strip = await renderTextStrip(txt, sizeMm, 300)
-      addImage(strip.image, (W - strip.wMm) / 2, yMm, strip.wMm, strip.hMm)
+  // 导出标注：刀序 / 纸边刻度 / 页眉落款全部来自当前切割步骤（与 PNG 同一套，见 sheetMarks.ts）
+  const marks = computeSheetMarks(sheet, paper, input.task)
+
+  // 页眉 / 落款：分别贴上、下纸边，水平居中；没填则不画
+  for (const hf of [marks.header, marks.footer]) {
+    if (!hf) continue
+    if (hasNonAscii(hf.text)) {
+      const strip = await renderTextStrip(hf.text, hf.sizeMm, 300)
+      addImage(strip.image, hf.xMm - strip.wMm / 2, hf.yMm - strip.hMm / 2, strip.wMm, strip.hMm)
     } else {
-      body.push(text(px(W / 2), py(yMm + sizeMm) + sizeMm * 0.2 * S, txt, sizeMm * S * 0.9, false, true))
+      const sizePt = hf.sizeMm * S * 0.9
+      body.push(text(px(hf.xMm), py(hf.yMm) - sizePt * 0.35, hf.text, sizePt, false, 'c'))
     }
   }
 
@@ -123,26 +124,89 @@ async function buildSheetPage(
     body.push(`${n2(px(p.x))} ${n2(py(p.y + p.h))} ${n2(px(p.w))} ${n2(px(p.h))} re S Q`)
     const cx = px(p.x + p.w / 2)
     const cy = py(p.y + p.h / 2)
-    body.push(text(cx, cy, `#${p.seq}`, Math.min(9, Math.max(5, p.h * 0.9)), true, true))
+    body.push(text(cx, cy, `#${p.seq}`, Math.min(9, Math.max(5, p.h * 0.9)), true, 'c'))
     body.push(
-      text(cx, cy - Math.min(9, Math.max(5, p.h * 0.9)) * 1.15, asciiOnly(input.sizeLabelOf(p)), 4.6, false, true),
+      text(cx, cy - Math.min(9, Math.max(5, p.h * 0.9)) * 1.15, asciiOnly(input.sizeLabelOf(p)), 4.6, false, 'c'),
     )
   }
 
-  // 切割线
-  body.push('q 0.35 w 0.6 0.63 0.68 RG')
-  for (const c of sheet.cutSteps) {
-    if (c.axis === 'v') {
-      body.push(`${n2(px(c.at))} ${n2(py(c.from))} m ${n2(px(c.at))} ${n2(py(c.to))} l S`)
-    } else {
-      body.push(`${n2(px(c.from))} ${n2(py(c.at))} m ${n2(px(c.to))} ${n2(py(c.at))} l S`)
-    }
-  }
-  body.push('Q')
-
-  // 纸张外框 + 页脚信息
+  // 纸张外框
   body.push('q 0.6 w 0.6 0.65 0.7 RG')
   body.push(`${n2(px(0.3))} ${n2(py(H - 0.3))} ${n2(px(W - 0.6))} ${n2(px(H - 0.6))} re S Q`)
+
+  // 切割线：红色虚线，每刀标序号（白底红框）与走向箭头（from → to）
+  const CUT = '0.78 0.16 0.12'
+  if (marks.cuts.length) {
+    body.push(`q 0.5 w ${CUT} RG [2.2 1.4] 0 d`)
+    for (const c of marks.cuts) {
+      body.push(`% cut ${c.n}`)
+      if (c.axis === 'v') {
+        body.push(`${n2(px(c.at))} ${n2(py(c.from))} m ${n2(px(c.at))} ${n2(py(c.to))} l S`)
+      } else {
+        body.push(`${n2(px(c.from))} ${n2(py(c.at))} m ${n2(px(c.to))} ${n2(py(c.at))} l S`)
+      }
+    }
+    body.push('Q')
+    // 走向箭头（指向 to 端）
+    body.push(`q ${CUT} rg`)
+    const aw = 1.1
+    const al = 1.8
+    for (const c of marks.cuts) {
+      if (c.axis === 'v') {
+        body.push(
+          `${n2(px(c.at))} ${n2(py(c.to))} m ${n2(px(c.at - aw))} ${n2(py(c.to - al))} l ${n2(px(c.at + aw))} ${n2(py(c.to - al))} l f`,
+        )
+      } else {
+        body.push(
+          `${n2(px(c.to))} ${n2(py(c.at))} m ${n2(px(c.to - al))} ${n2(py(c.at - aw))} l ${n2(px(c.to - al))} ${n2(py(c.at + aw))} l f`,
+        )
+      }
+    }
+    body.push('Q')
+    // 刀序标签（白底红框，位置由 sheetMarks 防重叠布局给出，与 PNG 一致）
+    const lp = 8.5
+    for (const c of marks.cuts) {
+      const label = String(c.n)
+      const cx = px(c.lx)
+      const cy = py(c.ly)
+      const bw = textW(label, lp) + 3.6
+      const bh = lp + 3.2
+      body.push(`q 1 1 1 rg ${CUT} RG 0.5 w ${n2(cx - bw / 2)} ${n2(cy - bh / 2)} ${n2(bw)} ${n2(bh)} re B Q`)
+      body.push(`q ${CUT} rg`)
+      body.push(text(cx, cy - lp * 0.35, label, lp, true, 'c'))
+      body.push('Q')
+    }
+  }
+
+  // 纸边裁切刻度：每刀坐标投影到垂直两条纸边（纸内 3mm 短刻度 + 刀序小字）
+  const tickLen = 3
+  if (marks.ticks.length) {
+    body.push(`q 0.55 w ${CUT} RG`)
+    for (const t of marks.ticks) {
+      body.push(`% tick ${t.edge} ${n2(t.at)}`)
+      if (t.edge === 'top') {
+        body.push(`${n2(px(t.at))} ${n2(py(0))} m ${n2(px(t.at))} ${n2(py(tickLen))} l S`)
+      } else if (t.edge === 'bottom') {
+        body.push(`${n2(px(t.at))} ${n2(py(H - tickLen))} m ${n2(px(t.at))} ${n2(py(H))} l S`)
+      } else if (t.edge === 'left') {
+        body.push(`${n2(px(0))} ${n2(py(t.at))} m ${n2(px(tickLen))} ${n2(py(t.at))} l S`)
+      } else {
+        body.push(`${n2(px(W - tickLen))} ${n2(py(t.at))} m ${n2(px(W))} ${n2(py(t.at))} l S`)
+      }
+    }
+    body.push('Q')
+    body.push(`q ${CUT} rg`)
+    for (const t of marks.ticks) {
+      const label = tickLabel(t)
+      if (t.edge === 'top') body.push(text(px(t.at), py(tickLen + 1.9), label, 5, false, 'c'))
+      else if (t.edge === 'bottom') body.push(text(px(t.at), py(H - tickLen - 1.9), label, 5, false, 'c'))
+      else if (t.edge === 'left') body.push(text(px(tickLen + 0.7), py(t.at) - 1.75, label, 5, false, 'l'))
+      else body.push(text(px(W - tickLen - 0.7), py(t.at) - 1.75, label, 5, false, 'r'))
+    }
+    body.push('Q')
+  }
+
+  // 页脚信息（右对齐贴在纸边内，避免伸出纸外被裁掉）
   body.push(
     text(
       px(W - 2),
@@ -150,7 +214,7 @@ async function buildSheetPage(
       `Sheet ${index + 1}/${input.sheets.length}  ${n2(W)}x${n2(H)}mm  Print at 100%`,
       4.2,
       false,
-      false,
+      'r',
     ),
   )
 
@@ -176,13 +240,13 @@ async function buildInfoPage(input: PdfBuildInput): Promise<PageSpec> {
     ),
   )
 
-  // 100mm 校验尺（矢量）
+  // 100mm 校验尺（矢量实线，与 PNG 纸下方那把尺同长）
   const y = 34
   body.push('q 0.8 w 0.1 0.1 0.1 RG')
-  body.push(`${n2(px(15))} ${n2(py(y))} m ${n2(px(115))} ${n2(py(y))} l S`)
-  for (let v = 0; v <= 100; v += 10) {
+  body.push(`${n2(px(15))} ${n2(py(y))} m ${n2(px(15 + RULER_LENGTH_MM))} ${n2(py(y))} l S`)
+  for (let v = 0; v <= RULER_LENGTH_MM; v += 10) {
     body.push(`${n2(px(15 + v))} ${n2(py(y))} m ${n2(px(15 + v))} ${n2(py(y - 3))} l S`)
-    body.push(text(px(15 + v) - 4, py(y - 7), `${v}`, 7))
+    body.push(text(px(15 + v), py(y - 7), `${v}`, 7, false, 'c'))
   }
   body.push('Q')
   body.push(text(px(15), py(y + 8), '100 mm ruler - measure this line after printing', 8))

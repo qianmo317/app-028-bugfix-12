@@ -527,6 +527,13 @@ table.data tr:hover td {
   color: var(--ink-2);
   pointer-events: none;
 }
+/* 页眉 / 落款：贴上、下纸边居中（位置由 sheetMarks.ts 统一计算） */
+.sheet-hf {
+  max-width: 96%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .legend {
   display: flex;
