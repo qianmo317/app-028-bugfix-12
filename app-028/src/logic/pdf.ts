@@ -1,16 +1,17 @@
 /**
  * 手写 PDF 生成器（不依赖任何第三方库）
- * - 页面尺寸 = 相纸实际尺寸（mm -> pt），按 100% 打印即为 1:1
- * - 照片以 JPEG XObject 嵌入；中文说明以位图嵌入（PDF 内置西文字体无法显示中文）
+ * - 每张相纸一页：页面 = 相纸尺寸 + 四周标注带（与 PNG 完全相同的画面，见 logic/art.ts）
+ * - 照片以 JPEG XObject 嵌入；中文页眉/落款以位图嵌入（PDF 内置西文字体无法显示中文）
+ * - 末页为 100mm 校验尺与切割清单（A4）
  */
 import { imageToJpeg, renderTextBlock, renderTextStrip, type RasterImage } from './image'
+import { computeFrame, paintSheetArt, type ArtPhoto, type Painter } from './art'
 import { MM_TO_PT } from './units'
 import type { Paper, Placement, Sheet, Task } from './types'
 
 const S = MM_TO_PT
 
 const n2 = (v: number) => (Math.abs(v) < 0.005 ? '0' : v.toFixed(2))
-const asciiOnly = (s: string) => s.replace(/[^\x20-\x7E]/g, '')
 const hasNonAscii = (s: string) => /[^\x20-\x7E]/.test(s)
 const pdfEscape = (s: string) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)')
 
@@ -51,12 +52,135 @@ interface PageSpec {
   images: PageImage[]
 }
 
-/** 粗略估算 Helvetica 文本宽度（用于居中） */
-const textW = (s: string, size: number) => s.length * size * 0.52
+/** #rrggbb -> "r g b"（0~1） */
+function rgb(hex: string): string {
+  const n = parseInt(hex.slice(1), 16)
+  return `${((n >> 16) & 255) / 255} ${((n >> 8) & 255) / 255} ${(n & 255) / 255}`
+}
 
-function text(x: number, y: number, s: string, size: number, bold = false, center = false) {
-  const t = center ? x - textW(s, size) / 2 : x
-  return `BT /${bold ? 'F2' : 'F1'} ${n2(size)} Tf ${n2(t)} ${n2(y)} Td (${pdfEscape(s)}) Tj ET`
+/** 粗略 Helvetica 文本宽度（mm），需与 art.ts 的 asciiWidth 保持一致 */
+const textWMm = (s: string, sizeMm: number) => s.length * sizeMm * 0.56
+
+/**
+ * PDF 画面后端：输入纸张坐标系 mm（(0,0)=纸左上角，y 向下，标注带为负坐标），
+ * 内部换算成 PDF 用户坐标 pt（左下原点，y 向上）。
+ */
+class PdfPainter implements Painter {
+  private body: string[] = []
+  images: PageImage[] = []
+  private imgIdx = 0
+
+  constructor(
+    private pageH: number,
+    private offX: number,
+    private offY: number,
+    private photos: Map<string, RasterImage>,
+  ) {}
+
+  get content(): string {
+    return this.body.join('\n')
+  }
+
+  /** 纸张坐标 mm -> PDF 坐标 pt */
+  private X(mm: number): number {
+    return (this.offX + mm) * S
+  }
+  private Y(mm: number): number {
+    return (this.pageH - this.offY - mm) * S
+  }
+
+  fillRect(x: number, y: number, w: number, h: number, color: string): void {
+    this.body.push(`q ${rgb(color)} rg`)
+    this.body.push(`${n2(this.X(x))} ${n2(this.Y(y + h))} ${n2(w * S)} ${n2(h * S)} re f Q`)
+  }
+
+  strokeRect(x: number, y: number, w: number, h: number, color: string, widthMm = 0.2): void {
+    this.body.push(`q ${n2(widthMm * S)} w ${rgb(color)} RG`)
+    this.body.push(`${n2(this.X(x))} ${n2(this.Y(y + h))} ${n2(w * S)} ${n2(h * S)} re S Q`)
+  }
+
+  line(x1: number, y1: number, x2: number, y2: number, color: string, widthMm = 0.2, dashMm?: [number, number]): void {
+    const dash = dashMm ? `[${n2(dashMm[0] * S)} ${n2(dashMm[1] * S)}] 0 d ` : ''
+    this.body.push(`q ${n2(widthMm * S)} w ${rgb(color)} RG ${dash}`)
+    this.body.push(`${n2(this.X(x1))} ${n2(this.Y(y1))} m ${n2(this.X(x2))} ${n2(this.Y(y2))} l S Q`)
+  }
+
+  async text(
+    x: number,
+    y: number,
+    s: string,
+    sizeMm: number,
+    color: string,
+    align: 'left' | 'center' | 'right' = 'left',
+    halo = false,
+  ): Promise<void> {
+    if (!s) return
+    if (hasNonAscii(s)) {
+      const strip = await renderTextStrip(s, sizeMm, 300)
+      const x0 = align === 'center' ? x - strip.wMm / 2 : align === 'right' ? x - strip.wMm : x
+      this.addImage(strip.image, x0, y - strip.hMm / 2, strip.wMm, strip.hMm)
+      return
+    }
+    const w = textWMm(s, sizeMm)
+    const x0 = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x
+    if (halo) {
+      // PDF 无法给文字描边：用白色底块保证压图可读
+      const pad = 0.4
+      this.fillRect(x0 - pad, y - sizeMm * 0.55, w + pad * 2, sizeMm * 1.1, '#ffffff')
+    }
+    this.body.push(`BT /F1 ${n2(sizeMm * S)} Tf ${rgb(color)} rg`)
+    this.body.push(`${n2(this.X(x0))} ${n2(this.Y(y) + sizeMm * 0.35 * S)} Td (${pdfEscape(s)}) Tj ET`)
+  }
+
+  async pill(cx: number, cy: number, w: number, h: number, fill: string, stroke: string): Promise<void> {
+    const r = h / 2
+    const x = this.X(cx - w / 2)
+    const y = this.Y(cy + h / 2)
+    const ww = w * S
+    const hh = h * S
+    const rr = r * S
+    const k = 0.5523 * rr
+    this.body.push(`q ${rgb(fill)} rg ${rgb(stroke)} RG ${n2(0.18 * S)} w`)
+    this.body.push(
+      [
+        `${n2(x + rr)} ${n2(y)} m`,
+        `${n2(x + ww - rr)} ${n2(y)} l`,
+        `${n2(x + ww - rr + k)} ${n2(y)} ${n2(x + ww)} ${n2(y + rr - k)} ${n2(x + ww)} ${n2(y + rr)} c`,
+        `${n2(x + ww)} ${n2(y + hh - rr)} l`,
+        `${n2(x + ww)} ${n2(y + hh - rr + k)} ${n2(x + ww - rr + k)} ${n2(y + hh)} ${n2(x + ww - rr)} ${n2(y + hh)} c`,
+        `${n2(x + rr)} ${n2(y + hh)} l`,
+        `${n2(x + rr - k)} ${n2(y + hh)} ${n2(x)} ${n2(y + hh - rr + k)} ${n2(x)} ${n2(y + hh - rr)} c`,
+        `${n2(x)} ${n2(y + rr)} l`,
+        `${n2(x)} ${n2(y + rr - k)} ${n2(x + rr - k)} ${n2(y)} ${n2(x + rr)} ${n2(y)} c`,
+        'h B Q',
+      ].join(' '),
+    )
+  }
+
+  private addImage(raster: RasterImage, xMm: number, yMm: number, wMm: number, hMm: number): void {
+    this.imgIdx += 1
+    const name = `Im${this.imgIdx}`
+    this.images.push({
+      name,
+      raster,
+      xPt: this.X(xMm),
+      yPt: this.Y(yMm + hMm),
+      wPt: wMm * S,
+      hPt: hMm * S,
+    })
+    this.body.push(
+      `q ${n2(wMm * S)} 0 0 ${n2(hMm * S)} ${n2(this.X(xMm))} ${n2(this.Y(yMm + hMm))} cm /${name} Do Q`,
+    )
+  }
+
+  async drawPhoto(photo: ArtPhoto, x: number, y: number, w: number, h: number): Promise<void> {
+    const raster = this.photos.get(photo.key)
+    if (!raster) {
+      this.fillRect(x, y, w, h, '#eef2f7')
+      return
+    }
+    this.addImage(raster, x, y, w, h)
+  }
 }
 
 async function buildSheetPage(
@@ -66,95 +190,25 @@ async function buildSheetPage(
   photoRasters: Map<string, RasterImage>,
 ): Promise<PageSpec> {
   const { paper } = input
-  const W = paper.wMm
-  const H = paper.hMm
-  const px = (mm: number) => mm * S
-  const py = (mm: number) => (H - mm) * S
-  const head: string[] = []
-  const body: string[] = []
-  const images: PageImage[] = []
-  let imgIdx = 0
-
-  const addImage = (raster: RasterImage, xMm: number, yMm: number, wMm: number, hMm: number) => {
-    imgIdx += 1
-    const name = `Im${imgIdx}`
-    images.push({
-      name,
-      raster,
-      xPt: px(xMm),
-      yPt: py(yMm + hMm),
-      wPt: px(wMm),
-      hPt: px(hMm),
-    })
-    head.push(
-      `q ${n2(px(wMm))} 0 0 ${n2(px(hMm))} ${n2(px(xMm))} ${n2(py(yMm + hMm))} cm /${name} Do Q`,
-    )
-  }
-
-  // 页眉 / 落款
-  const header = input.task.headerText.trim()
-  const footer = input.task.footerText.trim()
-  for (const [txt, top] of [
-    [header, true],
-    [footer, false],
-  ] as Array<[string, boolean]>) {
-    if (!txt) continue
-    const sizeMm = Math.max(1.5, Math.min(4, paper.marginMm * 0.5))
-    const yMm = top ? paper.marginMm / 2 - sizeMm / 2 : H - paper.marginMm / 2 - sizeMm / 2
-    if (hasNonAscii(txt)) {
-      const strip = await renderTextStrip(txt, sizeMm, 300)
-      addImage(strip.image, (W - strip.wMm) / 2, yMm, strip.wMm, strip.hMm)
-    } else {
-      body.push(text(px(W / 2), py(yMm + sizeMm) + sizeMm * 0.2 * S, txt, sizeMm * S * 0.9, false, true))
-    }
-  }
-
-  // 照片
-  for (const p of sheet.placements) {
-    const ref = input.photoOf(p)
-    const raster = ref ? photoRasters.get(ref.key) : undefined
-    if (raster) {
-      addImage(raster, p.x, p.y, p.w, p.h)
-    } else {
-      body.push('q 0.92 0.94 0.97 rg')
-      body.push(`${n2(px(p.x))} ${n2(py(p.y + p.h))} ${n2(px(p.w))} ${n2(px(p.h))} re f Q`)
-    }
-    body.push('q 0.4 w 0.45 0.5 0.58 RG')
-    body.push(`${n2(px(p.x))} ${n2(py(p.y + p.h))} ${n2(px(p.w))} ${n2(px(p.h))} re S Q`)
-    const cx = px(p.x + p.w / 2)
-    const cy = py(p.y + p.h / 2)
-    body.push(text(cx, cy, `#${p.seq}`, Math.min(9, Math.max(5, p.h * 0.9)), true, true))
-    body.push(
-      text(cx, cy - Math.min(9, Math.max(5, p.h * 0.9)) * 1.15, asciiOnly(input.sizeLabelOf(p)), 4.6, false, true),
-    )
-  }
-
-  // 切割线
-  body.push('q 0.35 w 0.6 0.63 0.68 RG')
-  for (const c of sheet.cutSteps) {
-    if (c.axis === 'v') {
-      body.push(`${n2(px(c.at))} ${n2(py(c.from))} m ${n2(px(c.at))} ${n2(py(c.to))} l S`)
-    } else {
-      body.push(`${n2(px(c.from))} ${n2(py(c.at))} m ${n2(px(c.to))} ${n2(py(c.at))} l S`)
-    }
-  }
-  body.push('Q')
-
-  // 纸张外框 + 页脚信息
-  body.push('q 0.6 w 0.6 0.65 0.7 RG')
-  body.push(`${n2(px(0.3))} ${n2(py(H - 0.3))} ${n2(px(W - 0.6))} ${n2(px(H - 0.6))} re S Q`)
-  body.push(
-    text(
-      px(W - 2),
-      py(1.6),
-      `Sheet ${index + 1}/${input.sheets.length}  ${n2(W)}x${n2(H)}mm  Print at 100%`,
-      4.2,
-      false,
-      false,
-    ),
+  const frame = computeFrame(paper)
+  const painter = new PdfPainter(
+    frame.heightMm,
+    frame.left,
+    frame.top,
+    photoRasters,
   )
-
-  return { wMm: W, hMm: H, content: [...head, ...body].join('\n'), images }
+  await paintSheetArt({
+    task: input.task,
+    paper,
+    sheet,
+    sheetIndex: index,
+    sheetCount: input.sheets.length,
+    frame,
+    painter,
+    photoOf: input.photoOf,
+    sizeLabelOf: input.sizeLabelOf,
+  })
+  return { wMm: frame.widthMm, hMm: frame.heightMm, content: painter.content, images: painter.images }
 }
 
 async function buildInfoPage(input: PdfBuildInput): Promise<PageSpec> {
@@ -165,18 +219,13 @@ async function buildInfoPage(input: PdfBuildInput): Promise<PageSpec> {
   const body: string[] = []
   const images: PageImage[] = []
 
-  body.push(text(px(15), py(18), 'Calibration ruler & cut list', 15, true))
-  body.push(
-    text(
-      px(15),
-      py(24),
-      'Print at 100% (Actual size). Do NOT use "Fit to page".',
-      9,
-      false,
-    ),
-  )
+  const text = (x: number, y: number, s: string, size: number, bold = false) =>
+    `BT /${bold ? 'F2' : 'F1'} ${n2(size)} Tf ${n2(x)} ${n2(y)} Td (${pdfEscape(s)}) Tj ET`
 
-  // 100mm 校验尺（矢量）
+  body.push(text(px(15), py(18), 'Calibration ruler & cut list', 15, true))
+  body.push(text(px(15), py(24), 'Print at 100% (Actual size). Do NOT use "Fit to page".', 9))
+
+  // 100mm 校验尺（矢量实线）
   const y = 34
   body.push('q 0.8 w 0.1 0.1 0.1 RG')
   body.push(`${n2(px(15))} ${n2(py(y))} m ${n2(px(115))} ${n2(py(y))} l S`)
@@ -312,7 +361,8 @@ function concat(parts: Uint8Array[]): Uint8Array {
 }
 
 function serialize(objects: Uint8Array[]): Blob {
-  const header = ascii('%PDF-1.4\n%\u00e2\u00e3\u00cf\u00d3\n')
+  // 高位二进制标记（与原版一致，提示阅读器本文件含 8-bit 数据）
+  const header = ascii('%PDF-1.4\n%âãÏÓ\n')
   const chunks: Uint8Array[] = [header]
   let offset = header.length
   const offsets: number[] = []
@@ -331,7 +381,10 @@ function serialize(objects: Uint8Array[]): Blob {
   return new Blob(chunks, { type: 'application/pdf' })
 }
 
-/** 生成 1:1 打印 PDF：每张相纸一页（原始尺寸）+ 末页校验尺与切割清单 */
+/**
+ * 生成 1:1 打印 PDF：每张相纸一页（相纸 + 标注带，与 PNG 同画面）+ 末页校验尺与切割清单。
+ * PDF 为矢量打印母版；当 PDF 与图片不一致时以 PDF 为准。
+ */
 export async function buildPdf(input: PdfBuildInput): Promise<Blob> {
   const progress = input.onProgress ?? (() => {})
   const distinct = new Map<string, string>()

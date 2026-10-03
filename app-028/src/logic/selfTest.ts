@@ -5,6 +5,7 @@ import { validateCutSequence, type CutLine, type Rect } from './guillotine'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from './library'
 import { pack, sheetsFromPlacements, usableRegion, type PackGroup, type PackOptions } from './packer'
 import { buildPdf } from './pdf'
+import { computeFrame } from './art'
 import { MM_TO_PT, mmToPt, mmToPx, pxToMm } from './units'
 import type { Paper, Placement, Sheet } from './types'
 
@@ -342,7 +343,7 @@ function assertCoEdgeMerge(): AssertionResult {
   }
 }
 
-/** ⑥ 1:1 导出：PDF 页面尺寸 = 相纸实际尺寸，校验尺 100mm，照片尺寸误差 ≤0.5mm */
+/** ⑥ 1:1 导出：PDF/图片同一套画面（虚线刀序 + 纸边刻度 + 100mm 校验线 + 居中页眉落款） */
 async function assertExport1to1(): Promise<AssertionResult> {
   const t0 = performance.now()
   const problems: string[] = []
@@ -383,30 +384,36 @@ async function assertExport1to1(): Promise<AssertionResult> {
   })
   const text = await blob.text()
   const mb = /\/MediaBox \[0 0 ([\d.]+) ([\d.]+)\]/.exec(text)
+  const frame = computeFrame(paper)
   if (!mb) {
     problems.push('PDF 中找不到 MediaBox')
   } else {
     const w = Number(mb[1])
     const h = Number(mb[2])
-    if (Math.abs(w - mmToPt(paper.wMm)) > 0.01) {
-      problems.push(`PDF 页宽应为 ${mmToPt(paper.wMm).toFixed(2)}pt，实际 ${w}`)
+    // 页面 = 相纸 + 四周标注带（computeFrame 决定），不再是纯相纸尺寸
+    if (Math.abs(w - mmToPt(frame.widthMm)) > 0.01) {
+      problems.push(`PDF 页宽应为含标注带的 ${mmToPt(frame.widthMm).toFixed(2)}pt，实际 ${w}`)
     }
-    if (Math.abs(h - mmToPt(paper.hMm)) > 0.01) {
-      problems.push(`PDF 页高应为 ${mmToPt(paper.hMm).toFixed(2)}pt，实际 ${h}`)
+    if (Math.abs(h - mmToPt(frame.heightMm)) > 0.01) {
+      problems.push(`PDF 页高应为含标注带的 ${mmToPt(frame.heightMm).toFixed(2)}pt，实际 ${h}`)
     }
   }
   const pageCount = (text.match(/\/MediaBox/g) ?? []).length
   if (pageCount !== sheets.length + 1) {
     problems.push(`PDF 页数应为 ${sheets.length + 1}（每张相纸一页 + 校验页），实际 ${pageCount}`)
   }
-  // 校验尺：15mm ~ 115mm
+  // 末页（A4 校验页）的 100mm 矢量实线尺：15mm ~ 115mm
   const rulerFrom = mmToPt(15).toFixed(2)
   const rulerTo = mmToPt(115).toFixed(2)
   if (!text.includes(`${rulerFrom} `) || !text.includes(`${rulerTo} `)) {
-    problems.push('PDF 中找不到 100mm 校验尺线段')
+    problems.push('PDF 校验页找不到 100mm 校验尺线段')
   }
   const rulerMm = (mmToPt(115) - mmToPt(15)) / MM_TO_PT
-  if (Math.abs(rulerMm - 100) > 0.01) problems.push('校验尺长度不是 100mm')
+  if (Math.abs(rulerMm - 100) > 0.01) problems.push('校验页校验尺长度不是 100mm')
+  // 相纸页刀路必须是虚线：dash 相位 2.2mm/1.4mm（pt 下为 6.24/3.97）
+  if (!/\[6\.2[0-9] 3\.9[0-9]\] 0 d/.test(text)) {
+    problems.push('相纸页切割线不是虚线（找不到 dash 相位 [6.2x 3.9x]）')
+  }
   // 照片尺寸误差
   let maxErr = 0
   for (const s of sheets) {
@@ -415,19 +422,59 @@ async function assertExport1to1(): Promise<AssertionResult> {
     }
   }
   if (maxErr > 0.5) problems.push(`照片尺寸误差 ${maxErr.toFixed(3)}mm 超过 0.5mm`)
-  // 页面尺寸换算：PDF 与位图都必须 1:1
+  // 位图同样 1:1（像素随 DPI 缩放，mm 不变）
   if (Math.abs(pxToMm(mmToPx(paper.wMm, 300), 300) - paper.wMm) > 1e-9) {
     problems.push('位图导出不是 1:1')
   }
+  // 导出稿要素（刀序号/纸边刻度/100mm 实线/页眉落款/标注带）几何自检
+  problems.push(...assertArtMarks(sheets, paper))
   return {
     id: 'export',
-    title: '⑥ 1:1 导出：PDF 页面 = 相纸实际尺寸，含 100mm 校验尺，照片尺寸误差 ≤0.5mm',
+    title: '⑥ 1:1 导出：PDF/图片同一套画面（虚线刀序 + 纸边刻度 + 100mm 实线校验尺 + 页眉落款居中）',
     pass: problems.length === 0,
     detail: problems.length
       ? problems.join('；')
-      : `PDF ${pageCount} 页，页面 ${mmToPt(paper.wMm).toFixed(2)}×${mmToPt(paper.hMm).toFixed(2)}pt = ${paper.wMm}×${paper.hMm}mm（误差 0）；校验尺线段 ${rulerFrom}pt→${rulerTo}pt = 100.00mm；照片尺寸最大误差 ${maxErr.toFixed(3)}mm`,
+      : `PDF ${pageCount} 页，相纸页 ${mmToPt(frame.widthMm).toFixed(0)}×${mmToPt(
+          frame.heightMm,
+        ).toFixed(0)}pt（含标注带）；刀路虚线带序号牌；末页实线尺 100.00mm；照片误差 ${maxErr.toFixed(
+          3,
+        )}mm；PDF 与 PNG 均由 paintSheetArt 同源生成`,
     ms: Math.round(performance.now() - t0),
   }
+}
+
+/**
+ * 导出画面纯几何自检（不依赖 DOM）：
+ *  - 100mm 校验线恒为 100mm，且落在纸张下方标注带内、不越出图片边界
+ *  - 标注带宽度放得下刻度与行号
+ *  - 纸边刻度只可能落在纸宽/纸高范围内（位置取自当前 cutSteps 的 at，压线也成立）
+ * 边界：只有一刀、刀正好压纸边、无页眉落款、重复导出——结果均由同一输入确定性算出。
+ */
+function assertArtMarks(sheets: Sheet[], paper: Paper): string[] {
+  const problems: string[] = []
+  const f = computeFrame(paper)
+  if (Math.abs(f.rulerToX - f.rulerFromX - 100) > 1e-9) problems.push('100mm 校验线长度不是 100mm')
+  if (f.left < 8 || f.right < 8 || f.top < 8 || f.bottom < 12) {
+    problems.push('标注带宽度不足，刻度/校验线会被裁掉')
+  }
+  if (f.rulerFromX < -f.left - 1e-9 || f.rulerToX > paper.wMm + f.right + 1e-9) {
+    problems.push('100mm 校验线超出导出图片边界')
+  }
+  if (f.rulerY <= paper.hMm || f.rulerY > f.heightMm - 4) {
+    problems.push('100mm 校验线没有落在纸张下方标注带')
+  }
+  for (const s of sheets) {
+    s.cutSteps.forEach((c, i) => {
+      if (c.axis === 'v') {
+        if (c.at < -0.002 || c.at > paper.wMm + 0.002) {
+          problems.push(`第 ${i + 1} 刀（竖切）刻度位置超出纸宽`)
+        }
+      } else if (c.at < -0.002 || c.at > paper.hMm + 0.002) {
+        problems.push(`第 ${i + 1} 刀（横切）刻度位置超出纸高`)
+      }
+    })
+  }
+  return problems
 }
 
 /** ⑦ 性能：500 条目排样 < 500ms；手工微调增量校验 < 50ms */
@@ -494,7 +541,7 @@ export async function runSelfTest(): Promise<AssertionResult[]> {
   } catch (e) {
     results.push({
       id: 'export',
-      title: '⑥ 1:1 导出：PDF 页面 = 相纸实际尺寸，含 100mm 校验尺',
+      title: '⑥ 1:1 导出：PDF/图片同一套画面（虚线刀序 + 纸边刻度 + 100mm 校验尺）',
       pass: false,
       detail: `异常：${e instanceof Error ? e.message : String(e)}`,
       ms: 0,

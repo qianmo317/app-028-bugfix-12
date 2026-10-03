@@ -506,8 +506,14 @@ table.data tr:hover td {
 }
 .cutline {
   position: absolute;
-  background: #b9c2ce;
+  background: #5d6b7d;
   pointer-events: none;
+}
+.crop-mark {
+  position: absolute;
+  background: #3d4756;
+  pointer-events: none;
+  z-index: 3;
 }
 .cutline.hl {
   background: #e53935;
@@ -526,6 +532,18 @@ table.data tr:hover td {
   padding: 0 2px;
   color: var(--ink-2);
   pointer-events: none;
+}
+.sheet-header,
+.sheet-footer {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  white-space: nowrap;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.78);
+  padding: 0 2px;
+  pointer-events: none;
+  z-index: 4;
 }
 
 .legend {
@@ -599,6 +617,8 @@ table.data tr:hover td {
   }
   .print-only {
     display: block;
+    /* 给纸外 3.2mm 的裁切短刻度留位（不缩放纸面，仍为 1:1） */
+    padding: 8mm;
   }
   .main {
     padding: 0;
@@ -613,7 +633,8 @@ table.data tr:hover td {
     border: none;
     page-break-after: always;
     break-after: page;
-    margin: 0;
+    margin: 0 auto 16px;
+    overflow: visible;
   }
   @page {
     margin: 0;

@@ -95,6 +95,7 @@ async function exportPng(index: number) {
       task: task.value!,
       paper: paper.value,
       sheet,
+      sheetCount: sheets.value.length,
       dpi: dpi.value,
       photoOf: photoResolver(),
       sizeLabelOf,
@@ -118,6 +119,7 @@ async function exportAllPng() {
         task: task.value!,
         paper: paper.value,
         sheet: sheets.value[i],
+        sheetCount: sheets.value.length,
         dpi: dpi.value,
         photoOf: photoResolver(),
         sizeLabelOf,
@@ -216,7 +218,7 @@ function printView() {
             </label>
             <div class="row">
               <button class="btn primary" :disabled="busy" @click="exportPdf">
-                导出 1:1 PDF（每张相纸一页 + 校验尺）
+                导出 1:1 PDF（虚线刀序 + 纸边刻度 + 校验尺）
               </button>
             </div>
             <div class="row">
@@ -235,13 +237,21 @@ function printView() {
           <h3>打印须知</h3>
           <div class="note warn">
             打印时必须在打印对话框里<strong>关闭「适应页面 / Fit to page」</strong>，选择「实际大小 / 100%」；
-            否则尺寸会被整体缩放，1:1 不成立。打印后先用直尺量页面上的 100mm 校验尺确认。
+            否则尺寸会被整体缩放，1:1 不成立。打印后先用直尺量纸下方的 <strong>100mm 实线校验尺</strong>确认。
+          </div>
+          <div class="note" style="margin-top: 8px">
+            相纸页四周自带裁切标注带（纸边短刻度、刀序行号、下方校验尺都在带内），请<strong>按整页 100% 打印在一张比相纸略大的衬纸上</strong>，
+            不要把页面裁到相纸尺寸，否则刻度会被切掉。
+          </div>
+          <div class="note ok" style="margin-top: 8px">
+            PDF 与图片由<strong>同一套画面</strong>生成（虚线刀序牌、纸边刻度、100mm 校验线、页眉落款完全一致）；
+            若两份导出对不上，<strong>以 PDF 为准</strong>（矢量打印母版），请重新导出图片。
           </div>
           <div class="kv" style="margin-top: 10px">
             <dt>相纸</dt>
             <dd>{{ paper.wMm }}×{{ paper.hMm }} mm</dd>
             <dt>页数</dt>
-            <dd>{{ sheets.length }} 张相纸 + 1 页校验/清单</dd>
+            <dd>{{ sheets.length }} 张相纸（含标注带）+ 1 页校验/清单</dd>
             <dt>含照片</dt>
             <dd>{{ sheets.reduce((a, s) => a + s.placements.length, 0) }} 张（有导入底片时嵌入）</dd>
           </div>
@@ -301,6 +311,7 @@ function printView() {
           :show-safe-area="false"
           :show-grid="false"
           :show-cut-labels="true"
+          :show-crop-marks="true"
           :header-text="task.headerText"
           :footer-text="task.footerText"
           :thumb-of="thumbs"
